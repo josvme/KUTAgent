@@ -191,10 +191,26 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: functionDef{
+				Name:        "edit_file",
+				Description: "Create or overwrite a text file at the given path with provided content. Input: { path: string, content: string }",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":    map[string]any{"type": "string"},
+						"content": map[string]any{"type": "string"},
+					},
+					"required":             []string{"path", "content"},
+					"additionalProperties": false,
+				},
+			},
+		},
 	}
 
 	execTool := func(name string, args map[string]any) (string, error) {
-		fmt.Printf("Executing tool %s with args %v\n", name, args)
+		fmt.Printf("\u001B[91mTool\u001B[0m:  %s with args %v\n", name, args)
 		switch name {
 		case "time_now":
 			return time.Now().Format(time.RFC3339), nil
