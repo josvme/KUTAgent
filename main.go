@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -102,7 +104,7 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 	if endpoint == "" {
 		endpoint = "http://localhost:11434/api/chat"
 	}
-	// Provide a minimal tool registry: time_now and echo
+	// Provide a minimal tool registry: time_now and read_file
 	type functionDef struct {
 		Name        string         `json:"name"`
 		Description string         `json:"description,omitempty"`
@@ -162,14 +164,45 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 		{
 			Type: "function",
 			Function: functionDef{
-				Name:        "echo",
-				Description: "Echo back the provided text",
+				Name:        "read_file",
+				Description: "Read a text file from the current project directory and return its contents. Input: { path: string }",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"text": map[string]any{"type": "string"},
+						"path": map[string]any{"type": "string"},
 					},
-					"required":             []string{"text"},
+					"required":             []string{"path"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: functionDef{
+				Name:        "list_files",
+				Description: "List all files under the given directory path recursively, returning full paths. Input: { path: string }",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required":             []string{"path"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: functionDef{
+				Name:        "edit_file",
+				Description: "Create or overwrite a text file at the given path with provided content. Input: { path: string, content: string }",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":    map[string]any{"type": "string"},
+						"content": map[string]any{"type": "string"},
+					},
+					"required":             []string{"path", "content"},
 					"additionalProperties": false,
 				},
 			},
@@ -177,12 +210,105 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 	}
 
 	execTool := func(name string, args map[string]any) (string, error) {
+		fmt.Printf("\u001B[91mTool\u001B[0m:  %s with args %v\n", name, args)
 		switch name {
 		case "time_now":
 			return time.Now().Format(time.RFC3339), nil
-		case "echo":
-			v, _ := args["text"].(string)
-			return v, nil
+		case "read_file":
+			p, _ := args["path"].(string)
+			if p == "" {
+				return "", fmt.Errorf("missing required argument: path")
+			}
+			// Sanitize and scope to project root
+			root, err := os.Getwd()
+			if err != nil {
+				return "", fmt.Errorf("getwd: %w", err)
+			}
+			clean := filepath.Clean(p)
+			joined := filepath.Join(root, clean)
+			// Ensure the resolved path stays within root
+			rootWithSep := root + string(os.PathSeparator)
+			if !(joined == root || strings.HasPrefix(joined, rootWithSep)) {
+				return "", fmt.Errorf("access outside project root is not allowed")
+			}
+			fi, err := os.Stat(joined)
+			if err != nil {
+				return "", fmt.Errorf("stat file: %w", err)
+			}
+			if fi.IsDir() {
+				return "", fmt.Errorf("path is a directory, not a file")
+			}
+			const maxSize = 1 << 20 // 1MB
+			if fi.Size() > maxSize {
+				return "", fmt.Errorf("file too large: %d bytes (limit %d)", fi.Size(), maxSize)
+			}
+			b, err := os.ReadFile(joined)
+			if err != nil {
+				return "", fmt.Errorf("read file: %w", err)
+			}
+			return string(b), nil
+		case "list_files":
+			p, _ := args["path"].(string)
+			if p == "" {
+				return "", fmt.Errorf("missing required argument: path")
+			}
+			root, err := os.Getwd()
+			if err != nil {
+				return "", fmt.Errorf("getwd: %w", err)
+			}
+			clean := filepath.Clean(p)
+			joined := filepath.Join(root, clean)
+			rootWithSep := root + string(os.PathSeparator)
+			if !(joined == root || strings.HasPrefix(joined, rootWithSep)) {
+				return "", fmt.Errorf("access outside project root is not allowed")
+			}
+			info, err := os.Stat(joined)
+			if err != nil {
+				return "", fmt.Errorf("stat path: %w", err)
+			}
+			if !info.IsDir() {
+				return "", fmt.Errorf("path is not a directory")
+			}
+			// Walk directory tree and collect files
+			paths := make([]string, 0, 64)
+			const maxEntries = 5000
+			const maxOutputBytes = 1 << 20 // 1MB
+			var totalBytes int
+			err = filepath.WalkDir(joined, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					return nil
+				}
+				// Ensure still under root (defense in depth)
+				if !(path == root || strings.HasPrefix(path, rootWithSep)) {
+					return nil
+				}
+				paths = append(paths, path)
+				if len(paths) >= maxEntries {
+					return filepath.SkipDir
+				}
+				return nil
+			})
+			if err != nil {
+				return "", fmt.Errorf("walk dir: %w", err)
+			}
+			// Build output string with size guard
+			var b strings.Builder
+			for i, fp := range paths {
+				if i > 0 {
+					b.WriteString("\n")
+					totalBytes++
+				}
+				b.WriteString(fp)
+				totalBytes += len(fp)
+				if totalBytes > maxOutputBytes {
+					b.WriteString("\n... truncated due to output size limit ...")
+					break
+				}
+			}
+			return b.String(), nil
 		default:
 			return "", fmt.Errorf("unknown tool: %s", name)
 		}
@@ -239,8 +365,11 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 			// Append assistant tool-calling message to history
 			messages = append(messages, chatMessage{Role: chatResp.Message.Role, Content: chatResp.Message.Content})
 			for _, tc := range chatResp.Message.ToolCalls {
-				// Parse arguments JSON
-				args := map[string]any{}
+				// Use arguments provided by the model (may be nil)
+				args := tc.Function.Arguments
+				if args == nil {
+					args = map[string]any{}
+				}
 				result, err := execTool(tc.Function.Name, args)
 				if err != nil {
 					result = fmt.Sprintf("tool error: %v", err)
