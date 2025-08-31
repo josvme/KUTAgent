@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -174,6 +176,21 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: functionDef{
+				Name:        "read_file",
+				Description: "Read a text file from the current project directory and return its contents. Input: { path: string }",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required":             []string{"path"},
+					"additionalProperties": false,
+				},
+			},
+		},
 	}
 
 	execTool := func(name string, args map[string]any) (string, error) {
@@ -183,6 +200,39 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 		case "echo":
 			v, _ := args["text"].(string)
 			return v, nil
+		case "read_file":
+			p, _ := args["path"].(string)
+			if p == "" {
+				return "", fmt.Errorf("missing required argument: path")
+			}
+			// Sanitize and scope to project root
+			root, err := os.Getwd()
+			if err != nil {
+				return "", fmt.Errorf("getwd: %w", err)
+			}
+			clean := filepath.Clean(p)
+			joined := filepath.Join(root, clean)
+			// Ensure the resolved path stays within root
+			rootWithSep := root + string(os.PathSeparator)
+			if !(joined == root || strings.HasPrefix(joined, rootWithSep)) {
+				return "", fmt.Errorf("access outside project root is not allowed")
+			}
+			fi, err := os.Stat(joined)
+			if err != nil {
+				return "", fmt.Errorf("stat file: %w", err)
+			}
+			if fi.IsDir() {
+				return "", fmt.Errorf("path is a directory, not a file")
+			}
+			const maxSize = 1 << 20 // 1MB
+			if fi.Size() > maxSize {
+				return "", fmt.Errorf("file too large: %d bytes (limit %d)", fi.Size(), maxSize)
+			}
+			b, err := os.ReadFile(joined)
+			if err != nil {
+				return "", fmt.Errorf("read file: %w", err)
+			}
+			return string(b), nil
 		default:
 			return "", fmt.Errorf("unknown tool: %s", name)
 		}
@@ -239,8 +289,11 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 			// Append assistant tool-calling message to history
 			messages = append(messages, chatMessage{Role: chatResp.Message.Role, Content: chatResp.Message.Content})
 			for _, tc := range chatResp.Message.ToolCalls {
-				// Parse arguments JSON
-				args := map[string]any{}
+				// Use arguments provided by the model (may be nil)
+				args := tc.Function.Arguments
+				if args == nil {
+					args = map[string]any{}
+				}
 				result, err := execTool(tc.Function.Name, args)
 				if err != nil {
 					result = fmt.Sprintf("tool error: %v", err)
