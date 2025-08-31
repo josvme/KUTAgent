@@ -74,9 +74,7 @@ func (agent *Agent) Run(ctx context.Context) error {
 		// add to conversations
 		conversations = append(conversations, reply)
 
-		for _, content := range conversations {
-			fmt.Printf("\u001b[93mOllama\u001b[0m: %s\n", content.Content)
-		}
+		fmt.Printf("\u001b[93mOllama\u001b[0m: %s\n", reply.Content)
 	}
 	return nil
 }
@@ -104,15 +102,17 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 	if endpoint == "" {
 		endpoint = "http://localhost:11434/api/chat"
 	}
+	// Provide a minimal tool registry: time_now and echo
+	type functionDef struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description,omitempty"`
+		Parameters  map[string]any `json:"parameters,omitempty"`
+	}
 
 	// Define tool request/response types following Ollama tool-calling schema
 	type toolDef struct {
-		Type     string `json:"type"`
-		Function struct {
-			Name        string         `json:"name"`
-			Description string         `json:"description,omitempty"`
-			Parameters  map[string]any `json:"parameters,omitempty"`
-		} `json:"function"`
+		Type     string      `json:"type"`
+		Function functionDef `json:"function"`
 	}
 
 	type toolCall struct {
@@ -146,15 +146,10 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 		DoneReason string           `json:"done_reason"`
 	}
 
-	// Provide a minimal tool registry: time_now and echo
 	tools := []toolDef{
 		{
 			Type: "function",
-			Function: struct {
-				Name        string         `json:"name"`
-				Description string         `json:"description,omitempty"`
-				Parameters  map[string]any `json:"parameters,omitempty"`
-			}{
+			Function: functionDef{
 				Name:        "time_now",
 				Description: "Return the current local time in RFC3339 format",
 				Parameters: map[string]any{
@@ -166,11 +161,7 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 		},
 		{
 			Type: "function",
-			Function: struct {
-				Name        string         `json:"name"`
-				Description string         `json:"description,omitempty"`
-				Parameters  map[string]any `json:"parameters,omitempty"`
-			}{
+			Function: functionDef{
 				Name:        "echo",
 				Description: "Echo back the provided text",
 				Parameters: map[string]any{
