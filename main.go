@@ -104,7 +104,7 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 	if endpoint == "" {
 		endpoint = "http://localhost:11434/api/chat"
 	}
-	// Provide a minimal tool registry: time_now and echo
+	// Provide a minimal tool registry: time_now and read_file
 	type functionDef struct {
 		Name        string         `json:"name"`
 		Description string         `json:"description,omitempty"`
@@ -164,21 +164,6 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 		{
 			Type: "function",
 			Function: functionDef{
-				Name:        "echo",
-				Description: "Echo back the provided text",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"text": map[string]any{"type": "string"},
-					},
-					"required":             []string{"text"},
-					"additionalProperties": false,
-				},
-			},
-		},
-		{
-			Type: "function",
-			Function: functionDef{
 				Name:        "read_file",
 				Description: "Read a text file from the current project directory and return its contents. Input: { path: string }",
 				Parameters: map[string]any{
@@ -197,9 +182,6 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 		switch name {
 		case "time_now":
 			return time.Now().Format(time.RFC3339), nil
-		case "echo":
-			v, _ := args["text"].(string)
-			return v, nil
 		case "read_file":
 			p, _ := args["path"].(string)
 			if p == "" {
