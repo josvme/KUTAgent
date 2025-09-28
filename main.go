@@ -7,14 +7,97 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	htmllib "html"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+
+	htmlnode "golang.org/x/net/html"
 )
+
+// Helper functions for HTML content handling
+func isHTMLContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	if ct == "" {
+		return false
+	}
+	if strings.HasPrefix(ct, "text/html") {
+		return true
+	}
+	return strings.Contains(ct, "html")
+}
+
+func normalizeWS(s string) string {
+	var b bytes.Buffer
+	prevSpace := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		prevSpace = false
+	}
+	res := strings.TrimSpace(b.String())
+	return res
+}
+
+func stripTagsQuick(s string) string {
+	var out strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch r {
+		case '<':
+			inTag = true
+		case '>':
+			inTag = false
+		default:
+			if !inTag {
+				out.WriteRune(r)
+			}
+		}
+	}
+	return out.String()
+}
+
+func htmlToText(data []byte) string {
+	n, err := htmlnode.Parse(bytes.NewReader(data))
+	if err != nil {
+		// Fallback: naive stripping
+		return normalizeWS(htmllib.UnescapeString(stripTagsQuick(string(data))))
+	}
+	var sb strings.Builder
+	var walk func(*htmlnode.Node)
+	walk = func(nd *htmlnode.Node) {
+		if nd == nil {
+			return
+		}
+		if nd.Type == htmlnode.ElementNode {
+			// Skip script/style/noscript content
+			if nd.Data == "script" || nd.Data == "style" || nd.Data == "noscript" {
+				return
+			}
+		}
+		if nd.Type == htmlnode.TextNode {
+			sb.WriteString(nd.Data)
+			sb.WriteRune(' ')
+		}
+		for c := nd.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return normalizeWS(htmllib.UnescapeString(sb.String()))
+}
 
 type OllamaClient struct {
 }
@@ -224,6 +307,22 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: functionDef{
+				Name:        "fetch_url",
+				Description: "Fetch the content of a webpage via HTTP GET. Input: { url: string, timeout_sec?: integer }",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"url":         map[string]any{"type": "string"},
+						"timeout_sec": map[string]any{"type": "integer"},
+					},
+					"required":             []string{"url"},
+					"additionalProperties": false,
+				},
+			},
+		},
 	}
 
 	execTool := func(name string, args map[string]any) (string, error) {
@@ -372,6 +471,74 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				output = output[:maxCmdOutput] + "\n... truncated due to output size limit ..."
 			}
 			return fmt.Sprintf("exit_code=%d\n%s", exitCode, output), nil
+		case "fetch_url":
+			urlStr, _ := args["url"].(string)
+			if urlStr == "" {
+				return "", fmt.Errorf("missing required argument: url")
+			}
+			// validate URL
+			u, err := url.Parse(urlStr)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				return "", fmt.Errorf("invalid url")
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return "", fmt.Errorf("unsupported url scheme: %s", u.Scheme)
+			}
+			// parse optional timeout
+			fetchTimeout := 20
+			if v, ok := args["timeout_sec"]; ok {
+				switch t := v.(type) {
+				case float64:
+					if t > 0 {
+						fetchTimeout = int(t)
+					}
+				case int:
+					if t > 0 {
+						fetchTimeout = t
+					}
+				}
+			}
+			cctx := ctx
+			var cancel context.CancelFunc
+			if fetchTimeout > 0 {
+				cctx, cancel = context.WithTimeout(ctx, time.Duration(fetchTimeout)*time.Second)
+				defer cancel()
+			}
+			req, err := http.NewRequestWithContext(cctx, http.MethodGet, urlStr, nil)
+			if err != nil {
+				return "", fmt.Errorf("create request: %w", err)
+			}
+			req.Header.Set("Accept", "*/*")
+			req.Header.Set("User-Agent", "KutAgent/1.0 (+https://example.com)")
+			client := &http.Client{Timeout: 0}
+			resp, err := client.Do(req)
+			if err != nil {
+				return "", fmt.Errorf("request failed: %w", err)
+			}
+			defer resp.Body.Close()
+			const maxBytes = 1 << 20 // 1MB
+			lr := io.LimitReader(resp.Body, maxBytes+1)
+			data, err := io.ReadAll(lr)
+			if err != nil {
+				return "", fmt.Errorf("read body: %w", err)
+			}
+			truncated := len(data) > maxBytes
+			if truncated {
+				data = data[:maxBytes]
+			}
+			ct := resp.Header.Get("Content-Type")
+			prefix := fmt.Sprintf("status=%d content_type=\"%s\"\n", resp.StatusCode, ct)
+			var body string
+			if isHTMLContentType(ct) {
+				body = htmlToText(data)
+			} else {
+				body = string(data)
+			}
+			if truncated {
+				body += "\n... truncated due to 32KB limit ..."
+			}
+			fmt.Println(body)
+			return prefix + body, nil
 		default:
 			return "", fmt.Errorf("unknown tool: %s", name)
 		}
