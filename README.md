@@ -7,6 +7,7 @@ Currently has the following features:
 - Tool calling capabilities with built-in functions
 - File operations (read, list, edit files)
 - Get current time
+- Run arbitrary shell commands via tool (run_shell) with timeout and output size limits
 - Conversation history
 - Configurable model and endpoint
 
@@ -37,4 +38,24 @@ import (
         "os"
         "path/filepath"
 )
+```
+
+### run_shell tool
+
+The agent exposes a tool named `run_shell` that allows executing arbitrary shell commands.
+
+- Parameters:
+  - `command` (string, required): The shell command to execute.
+  - `timeout_sec` (integer, optional, default 30): Max time to allow the command to run.
+- Behavior:
+  - Executes via `sh -c` so you can use shell features like pipes and redirection.
+  - Captures combined stdout and stderr, limited to 1MB; output beyond that is truncated.
+  - Returns an exit code and the combined output.
+
+Example interaction:
+
+```text
+You: list files in the repository
+Tool:  run_shell with args map[command:ls -1]
+Ollama: Here are the files in the repository: ...
 ```
