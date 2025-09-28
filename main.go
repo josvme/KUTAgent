@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -224,6 +225,22 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: functionDef{
+				Name:        "fetch_url",
+				Description: "Fetch the content of a webpage via HTTP GET. Input: { url: string, timeout_sec?: integer }",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"url":         map[string]any{"type": "string"},
+						"timeout_sec": map[string]any{"type": "integer"},
+					},
+					"required":             []string{"url"},
+					"additionalProperties": false,
+				},
+			},
+		},
 	}
 
 	execTool := func(name string, args map[string]any) (string, error) {
@@ -372,6 +389,68 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				output = output[:maxCmdOutput] + "\n... truncated due to output size limit ..."
 			}
 			return fmt.Sprintf("exit_code=%d\n%s", exitCode, output), nil
+		case "fetch_url":
+			urlStr, _ := args["url"].(string)
+			if urlStr == "" {
+				return "", fmt.Errorf("missing required argument: url")
+			}
+			// validate URL
+			u, err := url.Parse(urlStr)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				return "", fmt.Errorf("invalid url")
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return "", fmt.Errorf("unsupported url scheme: %s", u.Scheme)
+			}
+			// parse optional timeout
+			fetchTimeout := 20
+			if v, ok := args["timeout_sec"]; ok {
+				switch t := v.(type) {
+				case float64:
+					if t > 0 {
+						fetchTimeout = int(t)
+					}
+				case int:
+					if t > 0 {
+						fetchTimeout = t
+					}
+				}
+			}
+			cctx := ctx
+			var cancel context.CancelFunc
+			if fetchTimeout > 0 {
+				cctx, cancel = context.WithTimeout(ctx, time.Duration(fetchTimeout)*time.Second)
+				defer cancel()
+			}
+			req, err := http.NewRequestWithContext(cctx, http.MethodGet, urlStr, nil)
+			if err != nil {
+				return "", fmt.Errorf("create request: %w", err)
+			}
+			req.Header.Set("Accept", "*/*")
+			req.Header.Set("User-Agent", "KutAgent/1.0 (+https://example.com)")
+			client := &http.Client{Timeout: 0}
+			resp, err := client.Do(req)
+			if err != nil {
+				return "", fmt.Errorf("request failed: %w", err)
+			}
+			defer resp.Body.Close()
+			const maxBytes = 1 << 15 // 32KB
+			lr := io.LimitReader(resp.Body, maxBytes+1)
+			data, err := io.ReadAll(lr)
+			if err != nil {
+				return "", fmt.Errorf("read body: %w", err)
+			}
+			truncated := len(data) > maxBytes
+			if truncated {
+				data = data[:maxBytes]
+			}
+			ct := resp.Header.Get("Content-Type")
+			prefix := fmt.Sprintf("status=%d content_type=\"%s\"\n", resp.StatusCode, ct)
+			body := string(data)
+			if truncated {
+				body += "\n... truncated due to 1MB limit ..."
+			}
+			return prefix + body, nil
 		default:
 			return "", fmt.Errorf("unknown tool: %s", name)
 		}

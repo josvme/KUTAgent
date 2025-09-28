@@ -59,3 +59,23 @@ You: list files in the repository
 Tool:  run_shell with args map[command:ls -1]
 Ollama: Here are the files in the repository: ...
 ```
+
+### fetch_url tool
+
+Fetch the content of a webpage via HTTP GET.
+
+- Parameters:
+  - `url` (string, required): The HTTP/HTTPS URL to fetch.
+  - `timeout_sec` (integer, optional, default 20): Per-request timeout in seconds.
+- Behavior:
+  - Supports only `http` and `https` schemes; rejects others.
+  - Sends a simple `User-Agent: KutAgent/1.0` and `Accept: */*`.
+  - Response is returned as a string prefixed with status code and content type, e.g., `status=200 content_type="text/html; charset=UTF-8"` followed by a newline and the body.
+  - The body is limited to 1MB; larger responses are truncated and a notice is appended.
+
+Example tool return format:
+
+```text
+status=200 content_type="text/html; charset=UTF-8"
+<!doctype html>...
+```
