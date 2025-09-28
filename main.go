@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	htmllib "html"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,7 +16,88 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+
+	htmlnode "golang.org/x/net/html"
 )
+
+// Helper functions for HTML content handling
+func isHTMLContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	if ct == "" {
+		return false
+	}
+	if strings.HasPrefix(ct, "text/html") {
+		return true
+	}
+	return strings.Contains(ct, "html")
+}
+
+func normalizeWS(s string) string {
+	var b bytes.Buffer
+	prevSpace := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		prevSpace = false
+	}
+	res := strings.TrimSpace(b.String())
+	return res
+}
+
+func stripTagsQuick(s string) string {
+	var out strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch r {
+		case '<':
+			inTag = true
+		case '>':
+			inTag = false
+		default:
+			if !inTag {
+				out.WriteRune(r)
+			}
+		}
+	}
+	return out.String()
+}
+
+func htmlToText(data []byte) string {
+	n, err := htmlnode.Parse(bytes.NewReader(data))
+	if err != nil {
+		// Fallback: naive stripping
+		return normalizeWS(htmllib.UnescapeString(stripTagsQuick(string(data))))
+	}
+	var sb strings.Builder
+	var walk func(*htmlnode.Node)
+	walk = func(nd *htmlnode.Node) {
+		if nd == nil {
+			return
+		}
+		if nd.Type == htmlnode.ElementNode {
+			// Skip script/style/noscript content
+			if nd.Data == "script" || nd.Data == "style" || nd.Data == "noscript" {
+				return
+			}
+		}
+		if nd.Type == htmlnode.TextNode {
+			sb.WriteString(nd.Data)
+			sb.WriteRune(' ')
+		}
+		for c := nd.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return normalizeWS(htmllib.UnescapeString(sb.String()))
+}
 
 type OllamaClient struct {
 }
@@ -434,7 +516,7 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				return "", fmt.Errorf("request failed: %w", err)
 			}
 			defer resp.Body.Close()
-			const maxBytes = 1 << 15 // 32KB
+			const maxBytes = 1 << 20 // 1MB
 			lr := io.LimitReader(resp.Body, maxBytes+1)
 			data, err := io.ReadAll(lr)
 			if err != nil {
@@ -446,10 +528,16 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 			}
 			ct := resp.Header.Get("Content-Type")
 			prefix := fmt.Sprintf("status=%d content_type=\"%s\"\n", resp.StatusCode, ct)
-			body := string(data)
-			if truncated {
-				body += "\n... truncated due to 1MB limit ..."
+			var body string
+			if isHTMLContentType(ct) {
+				body = htmlToText(data)
+			} else {
+				body = string(data)
 			}
+			if truncated {
+				body += "\n... truncated due to 32KB limit ..."
+			}
+			fmt.Println(body)
 			return prefix + body, nil
 		default:
 			return "", fmt.Errorf("unknown tool: %s", name)
