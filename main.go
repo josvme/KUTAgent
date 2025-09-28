@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -207,6 +208,22 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: functionDef{
+				Name:        "run_shell",
+				Description: "Run an arbitrary shell command and return its output, stderr, and exit code. Input: { command: string, timeout_sec?: integer }",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"command":     map[string]any{"type": "string"},
+						"timeout_sec": map[string]any{"type": "integer"},
+					},
+					"required":             []string{"command"},
+					"additionalProperties": false,
+				},
+			},
+		},
 	}
 
 	execTool := func(name string, args map[string]any) (string, error) {
@@ -309,6 +326,52 @@ func sendToOllamaWithModel(ctx context.Context, model string, text []chatMessage
 				}
 			}
 			return b.String(), nil
+		case "run_shell":
+			cmdStr, _ := args["command"].(string)
+			if cmdStr == "" {
+				return "", fmt.Errorf("missing required argument: command")
+			}
+			// parse optional timeout_sec
+			timeoutSec := 30
+			if v, ok := args["timeout_sec"]; ok {
+				switch t := v.(type) {
+				case float64:
+					if t > 0 {
+						timeoutSec = int(t)
+					}
+				case int:
+					if t > 0 {
+						timeoutSec = t
+					}
+				}
+			}
+			// run the command via shell
+			cctx := ctx
+			var cancelCmd context.CancelFunc
+			if timeoutSec > 0 {
+				cctx, cancelCmd = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+				defer cancelCmd()
+			}
+			cmd := exec.CommandContext(cctx, "sh", "-c", cmdStr)
+			var outBuf bytes.Buffer
+			cmd.Stdout = &outBuf
+			cmd.Stderr = &outBuf
+			err := cmd.Run()
+			exitCode := 0
+			if err != nil {
+				var ee *exec.ExitError
+				if errors.As(err, &ee) {
+					exitCode = ee.ExitCode()
+				} else {
+					exitCode = -1
+				}
+			}
+			output := outBuf.String()
+			const maxCmdOutput = 1 << 20 // 1MB
+			if len(output) > maxCmdOutput {
+				output = output[:maxCmdOutput] + "\n... truncated due to output size limit ..."
+			}
+			return fmt.Sprintf("exit_code=%d\n%s", exitCode, output), nil
 		default:
 			return "", fmt.Errorf("unknown tool: %s", name)
 		}
