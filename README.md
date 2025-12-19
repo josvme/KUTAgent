@@ -1,15 +1,12 @@
 ## A basic agent
 
-It uses Ollama API along with Qwen3 30b model.
-Currently has the following features:
-
+It uses Ollama API along with Qwen3 7b model.
+Currently, it has the following features:
 - Interactive chat via command line
-- Tool calling capabilities with built-in functions
-- File operations (read, list, edit files)
-- Get current time
-- Run arbitrary shell commands via tool (run_shell) with timeout and output size limits
-- Conversation history
-- Configurable model and endpoint
+- Tool calling capabilities
+  - File operations (read, list, edit files)
+  - Get current time
+  - Run arbitrary shell commands via tool (run_shell) with timeout and output size limits
 
 ## Usage
 
@@ -71,7 +68,7 @@ Fetch the content of a webpage via HTTP GET.
   - Supports only `http` and `https` schemes; rejects others.
   - Sends a simple `User-Agent: KutAgent/1.0` and `Accept: */*`.
   - Response is returned as a string prefixed with status code and content type, e.g., `status=200 content_type="text/html; charset=UTF-8"` followed by a newline and the body.
-  - The body is limited to 1MB; larger responses are truncated and a notice is appended.
+  - The body is limited to 1MB; larger responses are truncated, and a notice is appended.
 
 Example tool return format:
 
